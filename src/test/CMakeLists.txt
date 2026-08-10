@@ -101,7 +101,7 @@ add_executable(dbgfmttest
               )
 
 target_precompile_headers(dbgfmttest PRIVATE import.hpp)
-target_link_libraries(dbgfmttest PRIVATE cxxdbg-dbg-fmtcommon cxxdbg-dbg-fmt cxxdbg-dbg-fmtcm cxxdbg-dbg-fmtcore Boost::unit_test_framework)
+target_link_libraries(dbgfmttest PRIVATE cxxdbg-dbg-fmtcommon cxxdbg-dbg-fmt cxxdbg-dbg-fmtcm cxxdbg-dbg-fmtcore)
 
 if("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
     target_link_libraries(dbgfmttest PRIVATE rt)

@@ -6,7 +6,7 @@ add_executable(dbgfmtcmtest
                test.cpp
               )
 
-target_link_libraries(dbgfmtcmtest PRIVATE cxxdbg-dbg-fmtcm Boost::unit_test_framework)
+target_link_libraries(dbgfmtcmtest PRIVATE cxxdbg-dbg-fmtcm)
 
 if("${CMAKE_SYSTEM_NAME}" STREQUAL "Linux")
     target_link_libraries(dbgfmtcmtest PRIVATE rt)

@@ -6,6 +6,7 @@
 #include "stdcpp/stdcpp_bind.hpp"
 #include "../test2.hpp"
 #include <array>
+#include <cassert>
 #include <vector>
 #include <boost/test/unit_test.hpp>
 
@@ -17,20 +18,25 @@ namespace {
         stdcpp,
         libcxx
     };
+
+    /// libc++ std::function internal layout
+    enum libcxx_function_layout {
+        v19,   // __func::__f_ is __alloc_func with nested __compressed_pair
+        v20,   // __func::__f_ is __alloc_func with flat __func_/__alloc_ members
+        v22    // __func::__func_ holds the functor directly, no __alloc_func
+    };
 }
 
 
-/// Creates CM for testing libstdc++ std::function
-static cm::builder_result function_cm(cm::function_type * ftype, const cm::qual_type & functor_type) {
+/// Creates libc++ __alloc_func type for specified functor type. Only valid
+/// for layout v19 (nested __compressed_pair) and v20 (flat __func_/__alloc_
+/// members) - libc++ >= 22 has no __alloc_func at all.
+static cm::type_t * make_libcxx_alloc_func(const cm::qual_type & functor_type,
+                                           libcxx_function_layout layout) {
+    assert(layout != libcxx_function_layout::v22 && "libc++ >= 22 has no __alloc_func");
+
     auto & cm = test_context::current_context().cm();
     auto & dbg = test_context::current_context().dbg();
-
-    cm_builder b;
-
-    const std::array<cm::qual_type, 1> adr = {b.typeref("stdcpp_any_data")};
-    std::vector<cm::qual_type> invoker_params(adr.begin(), adr.end());
-    invoker_params.insert(invoker_params.end(), ftype->params().begin(), ftype->params().end());
-    auto invoker_type = b.ftype_r(ftype->ret_type(), invoker_params);
 
     // fake allocator type
     auto alloc_type = cm.find_named_record("my_allocator");
@@ -38,6 +44,68 @@ static cm::builder_result function_cm(cm::function_type * ftype, const cm::qual_
         alloc_type = cm.create_named_record("my_allocator", cm::record_kind::class_);
         dbg.make_def_rec_layout(alloc_type);
     }
+
+    cm_builder b;
+
+    if (layout == libcxx_function_layout::v20) {
+        return b
+            .ns("std").ns("__1").ns("__function")
+                .templ("__alloc_func", "Functor").record("libcxx_alloc_func", functor_type)
+                    .ivar("__func_", functor_type)
+                    .ivar("__alloc_", alloc_type)
+                .end().end()
+            .end().end().end()
+        .build().type("libcxx_alloc_func");
+    } else {
+        return b
+            .ns("std").ns("__1").ns("__function")
+                .templ("__alloc_func", "Functor").record("libcxx_alloc_func", functor_type)
+                    .ivar("__f_", libcxx_compressed_pair_type(functor_type, alloc_type))
+                .end().end()
+            .end().end().end()
+        .build().type("libcxx_alloc_func");
+    }
+}
+
+
+/// Creates libc++ __func type for specified functor type. For layout v22,
+/// the functor is stored directly on __func; for v19/v20 it goes through
+/// make_libcxx_alloc_func
+static cm::type_t * make_libcxx_func(const cm::qual_type & functor_type,
+                                     libcxx_function_layout layout) {
+    cm_builder b;
+
+    if (layout == libcxx_function_layout::v22) {
+        return b
+            .ns("std").ns("__1").ns("__function")
+                .templ("__func", "Functor").record("libcxx_func", functor_type)
+                    .ivar("__func_", functor_type)
+                .end().end()
+            .end().end().end()
+        .build().type("libcxx_func");
+    } else {
+        return b
+            .ns("std").ns("__1").ns("__function")
+                .templ("__func", "Functor").record("libcxx_func", functor_type)
+                    .ivar("__f_", make_libcxx_alloc_func(functor_type, layout))
+                .end().end()
+            .end().end().end()
+        .build().type("libcxx_func");
+    }
+}
+
+
+/// Creates CM for testing libstdc++ std::function. layout selects which
+/// libc++ __func/__alloc_func layout is used for the libc++ side of the CM,
+/// see make_libcxx_func
+static cm::builder_result function_cm(cm::function_type * ftype, const cm::qual_type & functor_type,
+                                       libcxx_function_layout layout = libcxx_function_layout::v19) {
+    cm_builder b;
+
+    const std::array<cm::qual_type, 1> adr = {b.typeref("stdcpp_any_data")};
+    std::vector<cm::qual_type> invoker_params(adr.begin(), adr.end());
+    invoker_params.insert(invoker_params.end(), ftype->params().begin(), ftype->params().end());
+    auto invoker_type = b.ftype_r(ftype->ret_type(), invoker_params);
 
     return b
         .ns("std")
@@ -67,19 +135,11 @@ static cm::builder_result function_cm(cm::function_type * ftype, const cm::qual_
 
             .ns("__1")
                 .ns("__function")
-                    .templ("__alloc_func", "Functor").record("libcxx_alloc_func", functor_type)
-                        .ivar("__f_", libcxx_compressed_pair_type(functor_type, alloc_type))
-                    .end().end()
-
                     .templ("__base", "FType").record("libcxx_base", ftype)
                     .end().end()
 
-                    .templ("__func", "Functor").record("libcxx_func", functor_type)
-                        .ivar("__f_", b.typeref("libcxx_alloc_func"))
-                    .end().end()
-
                     .templ("__value_func", "FType").record("libcxx_value_func", ftype)
-                        .ivar("__f_", b.ptype(b.typeref("libcxx_func")))
+                        .ivar("__f_", b.ptype(make_libcxx_func(functor_type, layout)))
                     .end().end()
                 .end()
 
@@ -159,16 +219,35 @@ static value make_stdcpp_function_functor(cm::function_type * ftype, const value
 }
 
 
-/// Makes libc++ std::function object with specified functor
-static value make_libcxx_function_functor(cm::function_type * ftype, const value & functor) {
+/// Makes libc++ std::function object with specified functor. layout selects
+/// which __func/__alloc_func layout is used, see make_libcxx_func
+static value make_libcxx_function_functor(cm::function_type * ftype,
+                                          const value & functor, libcxx_function_layout layout) {
     auto & cm = test_context::current_context().cm();
-    auto ftypes = function_cm(ftype, val_type(functor));
+    auto ftypes = function_cm(ftype, val_type(functor), layout);
 
     // creating __func object
-    auto alloc_type = cm.find_named_record("my_allocator");
-    auto alloc = make_val(alloc_type);
-    auto func_obj = make_val(ftypes.type("libcxx_func"));
-    func_obj["__f_"]["__f_"] << make_libcxx_compressed_pair(functor, alloc);
+    auto func_obj = make_val(make_libcxx_func(val_type(functor), layout));
+
+    switch (layout) {
+    case libcxx_function_layout::v22:
+        func_obj["__func_"] << functor;
+        break;
+
+    case libcxx_function_layout::v20: {
+        auto alloc_type = cm.find_named_record("my_allocator");
+        func_obj["__f_"]["__func_"] << functor;
+        func_obj["__f_"]["__alloc_"] << make_val(alloc_type);
+        break;
+    }
+
+    case libcxx_function_layout::v19:
+    default: {
+        auto alloc_type = cm.find_named_record("my_allocator");
+        func_obj["__f_"]["__f_"] << make_libcxx_compressed_pair(functor, make_val(alloc_type));
+        break;
+    }
+    }
 
     // creating std::function object
     auto func = make_val(ftypes.type("libcxx_function"));
@@ -177,15 +256,17 @@ static value make_libcxx_function_functor(cm::function_type * ftype, const value
 }
 
 
-/// Makes std::function object with specified functor
+/// Makes std::function object with specified functor. layout selects which
+/// libc++ __func/__alloc_func layout is used (ignored for function_kind::stdcpp)
 static value make_function_functor(function_kind knd,
                                    cm::function_type * ftype,
                                    const value & functor,
-                                   bool is_big = false) {
+                                   bool is_big = false,
+                                   libcxx_function_layout layout = libcxx_function_layout::v19) {
     if (knd == function_kind::stdcpp) {
         return make_stdcpp_function_functor(ftype, functor, is_big);
     } else {
-        return make_libcxx_function_functor(ftype, functor);
+        return make_libcxx_function_functor(ftype, functor, layout);
     }
 }
 
@@ -246,8 +327,10 @@ BOOST_AUTO_TEST_CASE(empty_libcxx) {
 }
 
 
-/// Tests formatting function with small functor
-void test_small_functor(context & ctx, function_kind knd) {
+/// Tests formatting function with small functor. layout selects which
+/// libc++ __func/__alloc_func layout is used (ignored for function_kind::stdcpp)
+void test_small_functor(context & ctx, function_kind knd,
+                        libcxx_function_layout layout = libcxx_function_layout::v19) {
     auto & cm = test_context::current_context().cm();
 
     cm_builder b;
@@ -264,7 +347,7 @@ void test_small_functor(context & ctx, function_kind knd) {
 
     auto ftype = cm.get_or_create_func_type(cm.bt_void());
 
-    auto f = make_function_functor(knd, ftype, my_functor, false);
+    auto f = make_function_functor(knd, ftype, my_functor, false, layout);
 
     auto res = ctx.format(f);
     BOOST_REQUIRE(res);
@@ -298,9 +381,21 @@ BOOST_AUTO_TEST_CASE(libcxx_small_functor) {
     test_small_functor(ctx, function_kind::libcxx);
 }
 
+/// Tests formatting libc++ >= 20 function with small functor
+BOOST_AUTO_TEST_CASE(libcxx_v20_small_functor) {
+    test_small_functor(ctx, function_kind::libcxx, libcxx_function_layout::v20);
+}
 
-/// Tests formatting function with bug functor
-void test_big_functor(context & ctx, function_kind knd) {
+/// Tests formatting libc++ >= 22 function with small functor
+BOOST_AUTO_TEST_CASE(libcxx_v22_small_functor) {
+    test_small_functor(ctx, function_kind::libcxx, libcxx_function_layout::v22);
+}
+
+
+/// Tests formatting function with bug functor. layout selects which
+/// libc++ __func/__alloc_func layout is used (ignored for function_kind::stdcpp)
+void test_big_functor(context & ctx, function_kind knd,
+                      libcxx_function_layout layout = libcxx_function_layout::v19) {
     auto & cm = test_context::current_context().cm();
 
     cm_builder b;
@@ -319,7 +414,7 @@ void test_big_functor(context & ctx, function_kind knd) {
 
     auto ftype = cm.get_or_create_func_type(cm.bt_void());
 
-    auto f = make_function_functor(knd, ftype, my_functor, true);
+    auto f = make_function_functor(knd, ftype, my_functor, true, layout);
     auto res = ctx.format(f);
     BOOST_REQUIRE(res);
 
@@ -352,9 +447,21 @@ BOOST_AUTO_TEST_CASE(big_libcxx_functor) {
     test_big_functor(ctx, function_kind::libcxx);
 }
 
+/// Tests formatting libc++ >= 20 function with big functor
+BOOST_AUTO_TEST_CASE(big_libcxx_v20_functor) {
+    test_big_functor(ctx, function_kind::libcxx, libcxx_function_layout::v20);
+}
 
-/// Tests formatting function with result of std::bind
-void test_bind_functor(context & ctx, function_kind knd) {
+/// Tests formatting libc++ >= 22 function with big functor
+BOOST_AUTO_TEST_CASE(big_libcxx_v22_functor) {
+    test_big_functor(ctx, function_kind::libcxx, libcxx_function_layout::v22);
+}
+
+
+/// Tests formatting function with result of std::bind. layout selects which
+/// libc++ __func/__alloc_func layout is used (ignored for function_kind::stdcpp)
+void test_bind_functor(context & ctx, function_kind knd,
+                       libcxx_function_layout layout = libcxx_function_layout::v19) {
     auto & cm = test_context::current_context().cm();
     auto & dbg = test_context::current_context().dbg();
 
@@ -373,7 +480,7 @@ void test_bind_functor(context & ctx, function_kind knd) {
 
     /// std::_Bind should always be considered outline in std::function storage
     /// because it's non trivial copyable
-    auto f = make_function_functor(knd, ftype, bind_obj, true);
+    auto f = make_function_functor(knd, ftype, bind_obj, true, layout);
 
     auto res = ctx.format(f);
     BOOST_REQUIRE(res);
@@ -405,6 +512,16 @@ BOOST_AUTO_TEST_CASE(stdcpp_bind_functor_no_template_params) {
 /// Tests foramtting libc++ function with result of std::bind
 BOOST_AUTO_TEST_CASE(libcxx_bind_functor) {
     test_bind_functor(ctx, function_kind::libcxx);
+}
+
+/// Tests formatting libc++ >= 20 function with result of std::bind
+BOOST_AUTO_TEST_CASE(libcxx_v20_bind_functor) {
+    test_bind_functor(ctx, function_kind::libcxx, libcxx_function_layout::v20);
+}
+
+/// Tests formatting libc++ >= 22 function with result of std::bind
+BOOST_AUTO_TEST_CASE(libcxx_v22_bind_functor) {
+    test_bind_functor(ctx, function_kind::libcxx, libcxx_function_layout::v22);
 }
 
 

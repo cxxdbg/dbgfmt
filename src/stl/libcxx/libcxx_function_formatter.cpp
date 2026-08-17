@@ -41,15 +41,29 @@ fmt_result_ref libcxx_function_formatter::format(const value & val) {
         });
     } else {
 
-        // reading compressed pair containing functor
-        auto functor_cp = (*func_obj)["__f_"]["__f_"];
+        // getting __func object
+        auto func = *func_obj;
 
-        // reading functor from compressed pair
+        // reading functor
         value functor;
-        if (functor_cp.base_at(0).has_field("__value_")) {
-            functor = functor_cp.base_at(0)["__value_"];
+        if (func.has_field("__func_")) {
+            // libc++ >= 22 layout, functor is directly on __func
+            functor = func["__func_"];
         } else {
-            functor = functor_cp.base_at(0).base_at(0);
+            // libc++ < 22 layout, functor is behind __alloc_func
+            auto alloc_func_obj = func["__f_"];
+            if (alloc_func_obj.has_field("__func_")) {
+                // libc++ >= 20 layout
+                functor = alloc_func_obj["__func_"];
+            } else {
+                // libc++ < 20 layout, functor is in compressed pair
+                auto functor_cp = alloc_func_obj["__f_"];
+                if (functor_cp.base_at(0).has_field("__value_")) {
+                    functor = functor_cp.base_at(0)["__value_"];
+                } else {
+                    functor = functor_cp.base_at(0).base_at(0);
+                }
+            }
         }
 
         // formatting functor value
